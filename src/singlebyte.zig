@@ -1,12 +1,15 @@
 const unicode = @import("unicode.zig");
 const encoding = @import("encoding.zig");
+const std = @import("std");
 
 const Codepoint = unicode.Codepoint;
 const Encoding = encoding.Encoding;
+const DecodeResult = encoding.DecodeResult;
 
 /// ASCII encoding algorithm
-const AscIiEncoding = struct {
+pub const AscIiEncoding = struct {
     const Self = @This();
+    const EncodingType = Encoding(EncodeError, DecodeError);
 
     /// Encode errors
     pub const EncodeError = error{
@@ -26,13 +29,7 @@ const AscIiEncoding = struct {
         DecodeEmptySlice,
     };
 
-    /// Length error
-    pub const LengthError = error{
-        /// Codepoint value not defined by the encoding method
-        UnmappedCodepoint,
-    };
-
-    encoding: Encoding(EncodeError, DecodeError, LengthError),
+    encoding: EncodingType,
 
     /// Initializes the encoding
     pub fn init() Self {
@@ -40,44 +37,38 @@ const AscIiEncoding = struct {
             .encoding = .{
                 .encodeSingleFn = encodeAsc,
                 .decodeSingleFn = decodeAsc,
-                .encodeLengthFn = encodeLengthAsc,
             },
         };
     }
 
     /// Encodes an ASCII codepoint
-    pub fn encodeAsc(enc: *Encoding, codepoint: Codepoint, bytes: []u8) EncodeError!void {
+    pub fn encodeAsc(enc: *EncodingType, codepoint: Codepoint, bytes: []u8) EncodeError!u3 {
         if (bytes.len == 0) return error.InsufficientSpace;
         if (codepoint > 127) return error.UnmappedCodepoint;
 
         bytes[0] = @truncate(u8, codepoint);
+        return 1;
     }
 
     /// Decodes an ASCII value
-    pub fn decodeAsc(enc: *Encoding, bytes: []const u8) DecodeError!Codepoint {
-        if (bytes.len == 0) return error.EmptySlice;
+    pub fn decodeAsc(enc: *EncodingType, bytes: []const u8) DecodeError!DecodeResult {
+        if (bytes.len == 0) return error.DecodeEmptySlice;
         if (bytes[0] > 127) return error.InvalidByte;
 
-        return bytes[0];
-    }
-
-    /// Tells the length of the encoded codepoint
-    /// remarks: Always 1 if codepoint valid
-    pub fn encodeLength(enc: *Encoding, codepoint: Codepoint) LengthError!usize {
-        if (codepoint < 128) return 1;
-
-        return error.UnmappedCodepoint;
+        return DecodeResult{ .codepoint = bytes[0], .length = 1 };
     }
 };
 
 /// Generic type for single byte table encodings
 ///
-/// **Remarks**: The `table` is the codepoint table of the encoding, `indexes` is the
-/// indexes of the codepoints in the `table`. **Both** of them **must** be ordered
-/// ascending according to the codepoint value
+/// > **Remarks**: The `table` is the codepoint table of the encoding, `indexes` is the
+/// > indexes of the codepoints in the `table`. **Both** of them **must** be ordered
+/// > ascending according to the codepoint value. If less than 128 codepoints are coded,
+/// > you must fill up with `0`s.
 pub fn SingleByteEncoding(comptime table: [128]Codepoint, comptime indexes: [128]u7) type {
     return struct {
         const Self = @This();
+        const EncodingType = Encoding(EncodeError, DecodeError);
 
         /// Encode Errors
         pub const EncodeError = error{
@@ -96,66 +87,54 @@ pub fn SingleByteEncoding(comptime table: [128]Codepoint, comptime indexes: [128
             EmptySlice,
         };
 
-        /// Length error
-        pub const LengthError = error{
-            /// Codepoint value not defined by the encoding method
-            UnmappedCodepoint,
-        };
-
-        encoding: Encoding(EncodeError, DecodeError, LengthError),
+        encoding: EncodingType,
 
         /// Initializes the encoding
         pub fn init() Self {
             return .{
                 .encoding = .{
-                    .decodeSingleFn = decodeSingle,
                     .encodeSingleFn = encodeSingle,
-                    .encodeLengthFn = encodeLength,
+                    .decodeSingleFn = decodeSingle,
                 },
             };
         }
 
         /// Encodes a single codepoint
-        pub fn encodeSingle(enc: *Encoding, codepoint: Codepoint, bytes: []u8) EncodeError!void {
+        pub fn encodeSingle(enc: *EncodingType, codepoint: Codepoint, bytes: []u8) EncodeError!u3 {
             if (bytes.len == 0) return error.InsufficientSpace;
 
-            if (codepoint < 128) {
+            if (codepoint < 128) { // ascii
                 bytes[0] = @truncate(u8, codepoint);
-                return;
+                return 1;
             }
 
             const idx_opt = codepointIndex(codepoint);
             if (idx_opt) |idx| {
-                bytes[0] = indexes[idx] + 128;
+                bytes[0] = @as(u8, indexes[idx]) + 128;
             } else {
                 return error.UnmappedCodepoint;
             }
+
+            return 1;
         }
 
         /// Decodes a single byte
-        pub fn decodeSingle(enc: *Encoding, bytes: []const u8) DecodeError!Codepoint {
+        pub fn decodeSingle(enc: *EncodingType, bytes: []const u8) DecodeError!DecodeResult {
             const self = @fieldParentPtr(Self, "encoding", enc);
 
             if (bytes.len == 0) return error.EmptySlice;
-            if (bytes[0] < 128) return bytes[0];
+            if (bytes[0] < 128) return DecodeResult{ .codepoint = bytes[0], .length = 1 }; // ascii
 
             const index: usize = indexes[bytes[0] - 128];
-            if (table[index] != 0) return table[index];
+            if (table[index] != 0) return DecodeResult{ .codepoint = table[index], .length = 1 };
 
             return error.InvalidByte;
-        }
-
-        /// Tells the length of the encoded codepoint
-        pub fn encodeLength(enc: *Encoding, codepoint: Codepoint) LengthError!usize {
-            if (codepoint < 128) return 1;
-            if (codepointIndex(codepoint)) return 1;
-
-            return error.UnmappedCodepoint;
         }
 
         /// Searches for the codepoint
         fn codepointIndex(codepoint: Codepoint) ?usize {
             const cmp = struct {
+                // function that compares two codepoints
                 pub fn compare(cp1: Codepoint, cp2: Codepoint) std.math.Order {
                     if (cp1 == cp2) return .eq;
                     if (cp1 < cp2) return .lt;
@@ -164,7 +143,7 @@ pub fn SingleByteEncoding(comptime table: [128]Codepoint, comptime indexes: [128
                 }
             };
 
-            return std.sort.binarySearch(Codepoint, codepoint, table, cmp.compare);
+            return std.sort.binarySearch(Codepoint, codepoint, table[0..], cmp.compare);
         }
     };
 }

@@ -13,17 +13,17 @@ pub const surrogate_max = 0xDFFF;
 pub const high_surrogate_max = 0xDBFF;
 
 /// Tells if codepoint is a surrogate
-pub fn isSurrogate(codepoint: u32) bool {
+pub fn isSurrogate(codepoint: Codepoint) bool {
     return codepoint >= surrogate_min and codepoint <= surrogate_max;
 }
 
 /// Tells if codepoint is a high surrogate
-pub fn isHighSurrogate(codepoint: u32) bool {
+pub fn isHighSurrogate(codepoint: Codepoint) bool {
     return codepoint >= surrogate_min and codepoint <= high_surrogate_max;
 }
 
 /// Tells if codepoint is low surrogate
-pub fn isLowSurrogate(codepoint: u32) bool {
+pub fn isLowSurrogate(codepoint: Codepoint) bool {
     return codepoint > high_surrogate_max and codepoint <= surrogate_max;
 }
 

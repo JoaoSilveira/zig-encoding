@@ -6,59 +6,6 @@ const Codepoint = unicode.Codepoint;
 const Encoding = encoding.Encoding;
 const DecodeResult = encoding.DecodeResult;
 
-/// ASCII encoding algorithm
-pub const AscIiEncoding = struct {
-    const Self = @This();
-    const EncodingType = Encoding(EncodeError, DecodeError);
-
-    /// Encode errors
-    pub const EncodeError = error{
-        /// Codepoint value not defined by the encoding method
-        UnmappedCodepoint,
-
-        /// Not enough space to encode the codepoint
-        InsufficientSpace,
-    };
-
-    /// Decode errors
-    pub const DecodeError = error{
-        /// Invalid byte value
-        InvalidByte,
-
-        /// Attempt to decode an empty slice
-        DecodeEmptySlice,
-    };
-
-    encoding: EncodingType,
-
-    /// Initializes the encoding
-    pub fn init() Self {
-        return .{
-            .encoding = .{
-                .encodeSingleFn = encodeAsc,
-                .decodeSingleFn = decodeAsc,
-            },
-        };
-    }
-
-    /// Encodes an ASCII codepoint
-    pub fn encodeAsc(enc: *EncodingType, codepoint: Codepoint, bytes: []u8) EncodeError!u3 {
-        if (bytes.len == 0) return error.InsufficientSpace;
-        if (codepoint > 127) return error.UnmappedCodepoint;
-
-        bytes[0] = @truncate(u8, codepoint);
-        return 1;
-    }
-
-    /// Decodes an ASCII value
-    pub fn decodeAsc(enc: *EncodingType, bytes: []const u8) DecodeError!DecodeResult {
-        if (bytes.len == 0) return error.DecodeEmptySlice;
-        if (bytes[0] > 127) return error.InvalidByte;
-
-        return DecodeResult{ .codepoint = bytes[0], .length = 1 };
-    }
-};
-
 /// Generic type for single byte table encodings
 ///
 /// > **Remarks**: The `table` is the codepoint table of the encoding, `indexes` is the
@@ -68,67 +15,126 @@ pub const AscIiEncoding = struct {
 pub fn SingleByteEncoding(comptime table: [128]Codepoint, comptime indexes: [128]u7) type {
     return struct {
         const Self = @This();
-        const EncodingType = Encoding(EncodeError, DecodeError);
 
-        /// Encode Errors
+        pub const Encoder = encoding.Encoder(SingleFallback, EncodeError, encode);
+        pub const Decoder = encoding.Decoder(SingleFallback, DecodeError, decode);
+        pub const StatefulDecoder = encoding.StatefulDecoder(SingleFallback, DecodeError, pushByte);
         pub const EncodeError = error{
-            /// Codepoint value not defined by the encoding method
             UnmappedCodepoint,
-
-            /// Not enough space to encode the codepoint
             InsufficientSpace,
+            InvalidFallbackValue,
         };
-
         pub const DecodeError = error{
-            /// Invalid byte value
             InvalidByte,
-
-            /// Attempt to decode an empty slice
             EmptySlice,
+            InvalidFallbackValue,
         };
 
-        encoding: EncodingType,
+        const SingleFallback = struct {
+            strategy: encoding.FallbackStrategy,
+        };
 
-        /// Initializes the encoding
-        pub fn init() Self {
-            return .{
-                .encoding = .{
-                    .encodeSingleFn = encodeSingle,
-                    .decodeSingleFn = decodeSingle,
-                },
-            };
+        pub fn encoder() Encoder {
+            return encoderFallback(.RaiseError);
         }
 
-        /// Encodes a single codepoint
-        pub fn encodeSingle(enc: *EncodingType, codepoint: Codepoint, bytes: []u8) EncodeError!u3 {
-            if (bytes.len == 0) return error.InsufficientSpace;
+        pub fn decoder() Decoder {
+            return decoderFallback(.RaiseError);
+        }
 
-            if (codepoint < 128) { // ascii
-                bytes[0] = @truncate(u8, codepoint);
+        pub fn stateful() StatefulDecoder {
+            return statefulFallback(.RaiseError);
+        }
+
+        pub fn encoderFallback(fallback: encoding.FallbackStrategy) Encoder {
+            return Encoder{ .context = .{ .strategy = fallback } };
+        }
+
+        pub fn decoderFallback(fallback: encoding.FallbackStrategy) Decoder {
+            return Decoder{ .context = .{ .strategy = fallback } };
+        }
+
+        pub fn statefulFallback(fallback: encoding.FallbackStrategy) StatefulDecoder {
+            return StatefulDecoder{ .context = .{ .strategy = fallback } };
+        }
+
+        pub fn encode(self: *SingleFallback, cp: Codepoint, slice: []u8) EncodeError!u3 {
+            if (slice.len == 0) return error.InsufficientSpace;
+
+            if (cp < 128) { // ascii
+                slice[0] = @truncate(u8, cp);
                 return 1;
             }
 
-            const idx_opt = codepointIndex(codepoint);
+            const idx_opt = codepointIndex(cp);
             if (idx_opt) |idx| {
-                bytes[0] = @as(u8, indexes[idx]) + 128;
-            } else {
-                return error.UnmappedCodepoint;
+                slice[0] = @as(u8, indexes[idx]) + 128;
+                return 1;
             }
 
-            return 1;
+            switch (self.strategy) {
+                .Ignore => return 0,
+                .RaiseError => return error.UnmappedCodepoint,
+                else => {
+                    const char = self.strategy.resolve(cp);
+
+                    if (char < 128) {
+                        slice[0] = @truncate(u8, char);
+                        return 1;
+                    }
+
+                    if (codepointIndex(char)) |index| {
+                        slice[0] = @as(u8, indexes[idx]) + 128;
+                        return 1;
+                    }
+
+                    return error.InvalidFallbackValue;
+                },
+            }
         }
 
-        /// Decodes a single byte
-        pub fn decodeSingle(enc: *EncodingType, bytes: []const u8) DecodeError!DecodeResult {
-            const self = @fieldParentPtr(Self, "encoding", enc);
-
+        pub fn decode(self: *SingleFallback, bytes: []const u8, cp: *Codepoint) DecodeError!u3 {
             if (bytes.len == 0) return error.EmptySlice;
-            if (bytes[0] < 128) return DecodeResult{ .codepoint = bytes[0], .length = 1 }; // ascii
+            if (bytes[0] < 128) {
+                cp.* = bytes[0];
+                return 1;
+            }
 
             const index: usize = indexes[bytes[0] - 128];
-            if (table[index] != 0) return DecodeResult{ .codepoint = table[index], .length = 1 };
+            if (table[index] != 0) {
+                cp.* = table[index];
+                return 1;
+            }
 
-            return error.InvalidByte;
+            switch (self.strategy) {
+                .Ignore => return 0,
+                .RaiseError => return error.InvalidByte,
+                else => {
+                    const char = self.strategy.resolve(table[index]);
+
+                    if (char < 128) {
+                        cp.* = char;
+                        return 1;
+                    }
+
+                    if (codepointIndex(char)) {
+                        cp.* = char;
+                        return 1;
+                    }
+
+                    return error.InvalidFallbackValue;
+                },
+            }
+        }
+
+        pub fn pushByte(self: *SingleFallback, slice: []const u8, cp: *Codepoint) DecodeError!u3 {
+            var cp: Codepoint = undefined;
+
+            if (0 == try decode(self, &[_]u8{byte}, &cp)) {
+                return null;
+            }
+
+            return cp;
         }
 
         /// Searches for the codepoint

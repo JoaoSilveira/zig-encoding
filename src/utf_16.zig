@@ -11,94 +11,113 @@ const DecodeResult = encoding.DecodeResult;
 pub fn Utf16Encoding(comptime Endianness: std.builtin.Endian) type {
     return struct {
         const Self = @This();
-        const EncodingType = encoding.Encoding(encoding.CommonEncodeError, DecodeError);
 
-        /// Errors that can happen while decoding
-        ///
-        /// > **remarks**: Read sequence as an UTF-16 encoded word sequence of a codepoint
-        pub const DecodeError = encoding.CommonDecodeError || unicode.CodepointError || error{
-            /// When the low surrogate appears first
+        pub const Encoder = encoding.Encoder(void, EncodeError, encode);
+        pub const Decoder = encoding.Decoder(void, DecodeError, decode);
+        pub const StatefulDecoder = encoding.StatefulDecoder(State, DecodeError, pushByte);
+        pub const EncodeError = unicode.CodepointError || error{
+            EncodingSurrogate,
+            InsufficientSpace,
+        };
+        pub const DecodeError = unicode.CodepointError || error{
+            DecodeSurrogate,
+            DecodeEmptySlice,
             WrongSurrogateOrder,
-
-            /// Expected low surrogate but there was none
             ExpectedLowSurrogate,
-
-            /// The slice have an odd number of bytes
             BrokenByteSlice,
         };
 
-        encoding: EncodingType,
+        const State = struct {
+            buffer: [4]u8 = undefined,
+            index: u3 = 0,
+        };
 
-        /// Initializes the UTF-16 encoding
-        pub fn init() Self {
-            return .{
-                .encoding = .{
-                    .encodeSingleFn = encode,
-                    .decodeSingleFn = decode,
-                },
-            };
+        pub fn encoder() Encoder {
+            return .{ .context = .{} };
         }
 
-        /// Encodes a single codepoint in Utf16
-        pub fn encode(enc: *EncodingType, codepoint: Codepoint, slice: []u8) encoding.CommonEncodeError!u3 {
-            if (unicode.isSurrogate(codepoint)) return error.EncodingSurrogate;
-            if (codepoint > unicode.codepoint_max) return error.InvalidCodepointValue;
-            if (slice.len < try codepointLength(codepoint)) return error.InsufficientSpace;
+        pub fn decoder() Decoder {
+            return .{ .context = .{} };
+        }
 
-            const nativeTo = std.mem.nativeTo;
+        pub fn stateful() StatefulDecoder {
+            return .{ .context = .{} };
+        }
+
+        pub fn encode(self: void, cp: Codepoint, slice: []u8) EncodeError!u3 {
+            if (unicode.isSurrogate(cp)) return error.EncodingSurrogate;
+            if (cp > unicode.codepoint_max) return error.InvalidCodepointValue;
+            if (slice.len < try codepointLength(cp)) return error.InsufficientSpace;
+
             var native_value: u16 = undefined;
+            if (isLargeCodepoint(cp)) {
+                const codepoint = cp - 0x10000;
 
-            if (isLargeCodepoint(codepoint)) {
-                const cp = codepoint - 0x10000;
-
-                native_value = nativeTo(
+                native_value = std.mem.nativeTo(
                     u16,
-                    @truncate(u16, unicode.surrogate_min + (cp >> 10)),
+                    @truncate(u16, unicode.surrogate_min + (codepoint >> 10)),
                     Endianness,
                 );
                 std.mem.copy(u8, slice, std.mem.asBytes(&native_value));
 
-                native_value = nativeTo(
+                native_value = std.mem.nativeTo(
                     u16,
-                    @truncate(u16, (unicode.high_surrogate_max + 1) + (cp & 0x3FF)),
+                    @truncate(u16, (unicode.high_surrogate_max + 1) + (codepoint & 0x3FF)),
                     Endianness,
                 );
                 std.mem.copy(u8, slice[2..], std.mem.asBytes(&native_value));
                 return 4;
             }
 
-            native_value = nativeTo(u16, @truncate(u16, codepoint), Endianness);
+            native_value = std.mem.nativeTo(u16, @truncate(u16, cp), Endianness);
             std.mem.copy(u8, slice, std.mem.asBytes(&native_value));
             return 2;
         }
-
-        /// Decodes a single codepoint from the slice
-        pub fn decode(enc: *EncodingType, slice: []const u8) DecodeError!DecodeResult {
+        
+        pub fn decode(self: void, slice: []const u8, cp: *Codepoint) DecodeError!u3 {
             if (slice.len == 0) return error.DecodeEmptySlice;
             if (slice.len < 2) return error.BrokenByteSlice;
 
             var native: [2]u16 = undefined;
-            const readIntSlice = std.mem.readIntSlice;
 
-            native[0] = readIntSlice(u16, slice, Endianness);
+            native[0] = std.mem.readIntSlice(u16, slice, Endianness);
 
             if (unicode.isSurrogate(native[0])) {
-                if (slice.len < 4) return error.UnexpectedSliceEnd;
-                native[1] = readIntSlice(u16, slice[2..], Endianness);
+                if (slice.len < 4) return error.BrokenByteSlice;
+                native[1] = std.mem.readIntSlice(u16, slice[2..], Endianness);
 
                 if (unicode.isLowSurrogate(native[0])) return error.WrongSurrogateOrder;
-                if (unicode.isHighSurrogate(native[1])) return error.ExpectedLowSurrogate;
+                if (!unicode.isLowSurrogate(native[1])) return error.ExpectedLowSurrogate;
 
-                return DecodeResult{
-                    .codepoint = ((@as(Codepoint, native[0] - 0xD800) << 10) | (native[1] - 0xDC00)) + 0x10000,
-                    .length = 4,
-                };
+                cp.* = ((@as(Codepoint, native[0] - 0xD800) << 10) | (native[1] - 0xDC00)) + 0x10000;
+                return 4;
             }
 
-            return DecodeResult{
-                .codepoint = @as(Codepoint, native[0]),
-                .length = 2,
-            };
+            cp.* = @as(Codepoint, native[0]);
+            return 2;
+        }
+        
+        pub fn pushByte(self: *State, byte: u8) DecodeError!?Codepoint {
+            self.buffer[self.index] = byte;
+            self.index += 1;
+
+            switch (self.index) {
+                2, 4 => {
+                    var cp: Codepoint = undefined;
+
+                    _ = decode(.{}, self.buffer[0..self.index], &cp) catch |e| switch (e) {
+                        error.BrokenByteSlice => return null,
+                        else => {
+                            self.index = 0;
+                            return e;
+                        },
+                    };
+
+                    self.index = 0;
+                    return cp;
+                },
+                else => return null,
+            }
         }
     };
 }
@@ -118,51 +137,144 @@ pub fn codepointLength(codepoint: Codepoint) unicode.CodepointError!u3 {
     return if (isLargeCodepoint(codepoint)) 4 else 2;
 }
 
-/// Decodes a single codepoint from the slice without security checks
-pub fn decodeUnsafe(comptime Endianness: std.builtin.Endian, slice: []const u16) u32 {
-    const toNative = std.mem.toNative;
-    var native: u16 = toNative(u16, slice[0], Endianness);
+const t = std.testing;
 
-    if (unicode.isSurrogate(native)) {
-        return ((@as(u32, native - 0xD800) << 10) | (toNative(u16, slice[1], Endianness) - 0xDC00)) + 0x10000;
-    }
+test "UTF16 Little Endian Decoder" {
+    const hex = @import("util.zig").hexString;
+    const decoder = Utf16LeEncoding.decoder();
 
-    return native;
+    t.expectEqual(decoder.codepoint(hex("4800")), 'H');
+    t.expectEqual(decoder.codepoint(hex("A303")), 'Σ');
+    t.expectEqual(decoder.codepoint(hex("0D11")), 'ᄍ');
+    t.expectEqual(decoder.codepoint(hex("3DD802DE")), '😂');
+    t.expectError(error.DecodeEmptySlice, decoder.length(hex("")));
+    t.expectError(error.BrokenByteSlice, decoder.length(hex("48")));
+    t.expectError(error.BrokenByteSlice, decoder.length(hex("3DD802")));
+    t.expectError(error.ExpectedLowSurrogate, decoder.length(hex("3DD84800")));
+    t.expectError(error.WrongSurrogateOrder, decoder.length(hex("02DE3DD8")));
 }
 
-/// Decodes a single codepoint from a little endian slice without security checks
-pub inline fn decodeUnsafeLe(slice: []const u16) u32 {
-    return decodeUnsafe(.Little, slice);
+test "UTF16 Big Endian Decoder" {
+    const hex = @import("util.zig").hexString;
+    const decoder = Utf16BeEncoding.decoder();
+
+    t.expectEqual(decoder.codepoint(hex("0048")), 'H');
+    t.expectEqual(decoder.codepoint(hex("03A3")), 'Σ');
+    t.expectEqual(decoder.codepoint(hex("110D")), 'ᄍ');
+    t.expectEqual(decoder.codepoint(hex("D83DDE02")), '😂');
+    t.expectError(error.DecodeEmptySlice, decoder.length(hex("")));
+    t.expectError(error.BrokenByteSlice, decoder.length(hex("48")));
+    t.expectError(error.BrokenByteSlice, decoder.length(hex("D83D02")));
+    t.expectError(error.ExpectedLowSurrogate, decoder.length(hex("D83D0048")));
+    t.expectError(error.WrongSurrogateOrder, decoder.length(hex("DE02D83D")));
 }
 
-/// Decodes a single codepoint from a big endian slice without security checks
-pub inline fn decodeUnsafeBe(slice: []const u16) u32 {
-    return decodeUnsafe(.Big, slice);
+test "UTF16 Little Endian Stateful Decoder" {
+    var decoder = Utf16LeEncoding.stateful();
+
+    t.expectEqual(decoder.pushByte(0x48), null);
+    t.expectEqual(decoder.pushByte(0x00), 'H');
+
+    t.expectEqual(decoder.pushByte(0xa3), null);
+    t.expectEqual(decoder.pushByte(0x03), 'Σ');
+
+    t.expectEqual(decoder.pushByte(0x0d), null);
+    t.expectEqual(decoder.pushByte(0x11), 'ᄍ');
+
+    t.expectEqual(decoder.pushByte(0x3d), null);
+    t.expectEqual(decoder.pushByte(0xd8), null);
+    t.expectEqual(decoder.pushByte(0x02), null);
+    t.expectEqual(decoder.pushByte(0xde), '😂');
+
+    t.expectEqual(decoder.pushByte(0x02), null);
+    t.expectEqual(decoder.pushByte(0xde), null);
+    t.expectEqual(decoder.pushByte(0x3d), null);
+    t.expectError(error.WrongSurrogateOrder, decoder.pushByte(0xd8));
 }
 
-/// Encodes a single codepoint in Utf16 without security checks
-pub fn encodeUnsafe(comptime Endianness: std.builtin.Endian, codepoint: u32, slice: []u16) u2 {
-    const nativeTo = std.mem.nativeTo;
+test "UTF16 Big Endian Stateful Decoder" {
+    var decoder = Utf16BeEncoding.stateful();
 
-    if (isLargeCodepoint(codepoint)) {
-        const cp = codepoint - 0x10000;
+    t.expectEqual(decoder.pushByte(0x00), null);
+    t.expectEqual(decoder.pushByte(0x48), 'H');
 
-        slice[0] = nativeTo(u16, @truncate(u16, unicode.surrogate_min + (cp >> 10)), Endianness);
-        slice[1] = nativeTo(u16, @truncate(u16, (unicode.high_surrogate_max + 1) + (cp & 0x3FF)), Endianness);
+    t.expectEqual(decoder.pushByte(0x03), null);
+    t.expectEqual(decoder.pushByte(0xa3), 'Σ');
 
-        return 2;
-    }
+    t.expectEqual(decoder.pushByte(0x11), null);
+    t.expectEqual(decoder.pushByte(0x0d), 'ᄍ');
 
-    slice[0] = nativeTo(u16, @truncate(u16, codepoint), Endianness);
-    return 1;
+    t.expectEqual(decoder.pushByte(0xd8), null);
+    t.expectEqual(decoder.pushByte(0x3d), null);
+    t.expectEqual(decoder.pushByte(0xde), null);
+    t.expectEqual(decoder.pushByte(0x02), '😂');
+
+    t.expectEqual(decoder.pushByte(0xde), null);
+    t.expectEqual(decoder.pushByte(0x02), null);
+    t.expectEqual(decoder.pushByte(0xd8), null);
+    t.expectError(error.WrongSurrogateOrder, decoder.pushByte(0x3d));
 }
 
-/// Encodes a single codepoint in Utf16Le without security checks
-pub inline fn encodeUnsafeLe(codepoint: u32, slice: []u16) u32 {
-    return encodeUnsafe(.Little, codepoint, slice);
+test "UTF16 Little Endian Encoder" {
+    const hex = @import("util.zig").hexString;
+    const encoder = Utf16LeEncoding.encoder();
+    var buff: [4]u8 = undefined;
+    var slice: []u8 = &buff;
+    
+    t.expect(std.mem.eql(
+        u8,
+        hex("4800"),
+        try encoder.slice('H', slice),
+    ));
+    t.expect(std.mem.eql(
+        u8,
+        hex("A303"),
+        try encoder.slice('Σ', slice),
+    ));
+    t.expect(std.mem.eql(
+        u8,
+        hex("0D11"),
+        try encoder.slice('ᄍ', slice),
+    ));
+    t.expect(std.mem.eql(
+        u8,
+        hex("3DD802DE"),
+        try encoder.slice('😂', slice),
+    ));
+    t.expectError(error.InsufficientSpace, encoder.encode('😂', slice[1..]));
+    t.expectError(error.InvalidCodepointValue, encoder.length(0x110000));
+    t.expectError(error.EncodingSurrogate, encoder.length(0xD800));
+    t.expectError(error.EncodingSurrogate, encoder.length(0xDFFF));
 }
 
-/// Encodes a single codepoint in Utf16Be without security checks
-pub inline fn encodeUnsafeBe(codepoint: u32, slice: []u16) u32 {
-    return encodeUnsafe(.Big, codepoint, slice);
+test "UTF16 Big Endian Encoder" {
+    const hex = @import("util.zig").hexString;
+    const encoder = Utf16BeEncoding.encoder();
+    var buff: [4]u8 = undefined;
+    var slice: []u8 = &buff;
+    
+    t.expect(std.mem.eql(
+        u8,
+        hex("0048"),
+        try encoder.slice('H', slice),
+    ));
+    t.expect(std.mem.eql(
+        u8,
+        hex("03A3"),
+        try encoder.slice('Σ', slice),
+    ));
+    t.expect(std.mem.eql(
+        u8,
+        hex("110D"),
+        try encoder.slice('ᄍ', slice),
+    ));
+    t.expect(std.mem.eql(
+        u8,
+        hex("D83DDE02"),
+        try encoder.slice('😂', slice),
+    ));
+    t.expectError(error.InsufficientSpace, encoder.encode('😂', slice[1..]));
+    t.expectError(error.InvalidCodepointValue, encoder.length(0x110000));
+    t.expectError(error.EncodingSurrogate, encoder.length(0xD800));
+    t.expectError(error.EncodingSurrogate, encoder.length(0xDFFF));
 }

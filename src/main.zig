@@ -1,10 +1,5 @@
 const std = @import("std");
 
-test "nothing" {
-    const utf = Utf8Encoding{};
-    const ut1 = Utf16Encoding{};
-}
-
 fn refEverything(comptime T: type) void {
     comptime {
         for (std.meta.declarations(T)) |decl| {
@@ -12,7 +7,7 @@ fn refEverything(comptime T: type) void {
 
             if (decl.data != .Type) continue;
 
-            switch (@typeId(decl.data.Type)) {
+            switch (@typeInfo(decl.data.Type)) {
                 .Struct => refEverything(decl.data.Type),
                 .Enum => refEverything(decl.data.Type),
                 .Union => refEverything(decl.data.Type),
@@ -23,10 +18,38 @@ fn refEverything(comptime T: type) void {
 }
 
 pub fn main() void {
-    refEverything(@import("utf_16.zig"));
-    refEverything(@import("utf_8.zig"));
-    refEverything(@import("singlebyte.zig"));
-    
+    // refEverything(@import("utf_16.zig"));
+    // refEverything(@import("utf_8.zig"));
+    // refEverything(@import("singlebyte.zig"));
+
+    // var t = Aux.help();
+    // const utf_8 = @import("utf_8.zig");
+
+    // var encoding = utf_8.Utf8Encoding{};
+    // var encoder = utf_8.Utf8Encoding.defaultEncoder();
+    // var decoder = utf_8.Utf8Encoding.defaultDecoder();
+    // var stateful = utf_8.Utf8Encoding.defaultStateful();
+
+    // const utf_16 = @import("utf_16.zig");
+
+    // var encoding = utf_16.Utf16LeEncoding{};
+    // var encoder = utf_16.Utf16LeEncoding.encoder();
+    // var decoder = utf_16.Utf16LeEncoding.decoder();
+    // var stateful = utf_16.Utf16LeEncoding.stateful();
+
+    // const utf_16 = @import("utf_16.zig");
+
+    // var encoding = utf_16.Utf16BeEncoding{};
+    // var encoder = utf_16.Utf16BeEncoding.encoder();
+    // var decoder = utf_16.Utf16BeEncoding.decoder();
+    // var stateful = utf_16.Utf16BeEncoding.stateful();
+    const util = @import("util.zig");
+
+    // std.debug.warn("{}\n", .{encoding.index});
+    // var buff: [27]u8 = undefined;
+    // var enc = encoding.encode(27, buff[0..]);
+    // var encoder: utf_8.Utf8Encoding.Encoder = undefined;
+
     // const utf8 = @import("utf_8.zig");
 
     // var enc = utf8.Utf8Encoding.init();
@@ -107,4 +130,11 @@ pub fn main() void {
 
     //     std.debug.warn("\n\n\n\n\n", .{});
     // }
+}
+
+test "all" {
+    std.meta.refAllDecls(@import("utf_8.zig"));
+    std.meta.refAllDecls(@import("utf_16.zig"));
+    std.meta.refAllDecls(@import("utf_32.zig"));
+    std.meta.refAllDecls(@import("ascii.zig"));
 }

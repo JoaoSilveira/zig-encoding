@@ -18,7 +18,12 @@ pub fn SingleByteEncoding(comptime table: [128]Codepoint, comptime indexes: [128
 
         pub const Encoder = encoding.Encoder(SingleFallback, EncodeError, encode);
         pub const Decoder = encoding.Decoder(SingleFallback, DecodeError, decode);
-        pub const StatefulDecoder = encoding.StatefulDecoder(SingleFallback, DecodeError, pushByte);
+        pub const StatefulDecoder = encoding.StatefulDecoder(
+            SingleFallback,
+            DecodeError,
+            pushByte,
+            SingleFallback.isValid,
+        );
         pub const EncodeError = error{
             UnmappedCodepoint,
             InsufficientSpace,
@@ -32,6 +37,10 @@ pub fn SingleByteEncoding(comptime table: [128]Codepoint, comptime indexes: [128
 
         const SingleFallback = struct {
             strategy: encoding.FallbackStrategy,
+
+            pub fn isValid(self: State) bool {
+                return true;
+            }
         };
 
         pub fn encoder() Encoder {

@@ -27,5 +27,5 @@ const std = @import("std");
 const encoding = @import("encoding.zig");
 
 var string = "Runtime string value";
-var target = encoding.convertAlloc(encoding.Utf8, string, encoding.Windows874, &std.heap.c_allocator) catch unreachable;
+var target = encoding.convertToAlloc(encoding.Utf8, string, encoding.Windows874, &std.heap.c_allocator) catch unreachable;
 ```

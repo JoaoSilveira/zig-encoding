@@ -12,6 +12,9 @@ pub const surrogate_max = 0xDFFF;
 /// the maximum value of a high surrogate
 pub const high_surrogate_max = 0xDBFF;
 
+/// the minimum value of a low surrogate
+pub const low_surrogate_min = 0xDC00;
+
 /// Tells if codepoint is a surrogate
 pub fn isSurrogate(codepoint: Codepoint) bool {
     return codepoint >= surrogate_min and codepoint <= surrogate_max;
@@ -24,11 +27,11 @@ pub fn isHighSurrogate(codepoint: Codepoint) bool {
 
 /// Tells if codepoint is low surrogate
 pub fn isLowSurrogate(codepoint: Codepoint) bool {
-    return codepoint > high_surrogate_max and codepoint <= surrogate_max;
+    return codepoint >= low_surrogate_min and codepoint <= surrogate_max;
 }
 
 /// Invalid codepoint value
 pub const CodepointError = error{
-    /// Indicates a codepoint value greater than 0x10FFFF
+    /// Indicates a codepoint value greater than `codepoint_max` (0x10FFFF)
     InvalidCodepointValue,
 };
